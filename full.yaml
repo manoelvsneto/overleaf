@@ -1,0 +1,215 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: overleaf
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mongo-pvc
+  namespace: overleaf
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: microk8s-hostpath
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongo
+  namespace: overleaf
+spec:
+  serviceName: "mongo"
+  replicas: 1
+  selector:
+    matchLabels: { app: mongo }
+  template:
+    metadata:
+      labels: { app: mongo }
+    spec:
+      containers:
+        - name: mongo
+          image: mongo:6.0
+          args: ["--bind_ip_all"]
+          ports:
+            - name: mongo
+              containerPort: 27017
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        storageClassName: microk8s-hostpath
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo
+  namespace: overleaf
+spec:
+  ports:
+    - name: mongo
+      port: 27017
+      targetPort: 27017
+  selector:
+    app: mongo
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: overleaf
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: microk8s-hostpath
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: overleaf
+spec:
+  serviceName: "redis"
+  replicas: 1
+  selector:
+    matchLabels: { app: redis }
+  template:
+    metadata:
+      labels: { app: redis }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7
+          args: ["--appendonly", "yes"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
+        storageClassName: microk8s-hostpath
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: overleaf
+spec:
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  selector:
+    app: redis
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: overleaf-pvc
+  namespace: overleaf
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: microk8s-hostpath
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: overleaf
+  namespace: overleaf
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: overleaf }
+  template:
+    metadata:
+      labels: { app: overleaf }
+    spec:
+      containers:
+        - name: overleaf
+          image: overleaf/overleaf:latest
+          # Porta padrão do app
+          ports:
+            - containerPort: 80
+          env:
+            # URL pública e e-mail admin (do Secret)
+            - name: OVERLEAF_SITE_URL
+              valueFrom: { secretKeyRef: { name: overleaf-env, key: OVERLEAF_SITE_URL } }
+            - name: OVERLEAF_ADMIN_EMAIL
+              valueFrom: { secretKeyRef: { name: overleaf-env, key: OVERLEAF_ADMIN_EMAIL } }
+            # Conexão com Mongo e Redis (serviços internos)
+            - name: OVERLEAF_MONGO_URL
+              value: "mongodb://mongo.overleaf.svc.cluster.local:27017/sharelatex"
+            - name: OVERLEAF_REDIS_HOST
+              value: "redis.overleaf.svc.cluster.local"
+            # Ajustes úteis: compilações e limites
+            - name: OVERLEAF_TEXLIVE_IMAGE
+              value: "texlive/texlive:latest"
+            - name: OVERLEAF_APP_NAME
+              value: "Overleaf (CE)"
+          volumeMounts:
+            - name: overleaf-data
+              mountPath: /var/lib/sharelatex
+      volumes:
+        - name: overleaf-data
+          persistentVolumeClaim:
+            claimName: overleaf-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: overleaf
+  namespace: overleaf
+spec:
+  selector:
+    app: overleaf
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: overleaf
+  namespace: overleaf
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+spec:
+  ingressClassName: public
+  rules:
+    - host: overleaf.archse.eng.br
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: overleaf
+                port:
+                  number: 80
+  tls:
+    - hosts: [ "overleaf.archse.eng.br" ]
+      secretName: overleaf-tls
